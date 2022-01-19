@@ -230,7 +230,7 @@ class NVMeOFConnector(base.BaseLinuxConnector):
             raise
 
     def _get_nvme_subsys(self):
-        # Example output: 
+        # Example output:
         # {
         #   'Subsystems' : [
         #     {
@@ -253,7 +253,7 @@ class NVMeOFConnector(base.BaseLinuxConnector):
         #
         # The above structure is no longer guaranteed to be valid
         # in newer versions of nvme-cli. The two 'Subsystems' sub-objects
-        # have been merged into single one. Now it looks like 
+        # have been merged into single one. Now it looks like
         #       ...
         #       'Name' : 'nvme-subsys0',
         #       'NQN' : 'nqn.2016-06.io.spdk:cnode1',
@@ -262,7 +262,7 @@ class NVMeOFConnector(base.BaseLinuxConnector):
 
         cmd = ['nvme', 'list-subsys', '-o', 'json']
         return self._execute(*cmd, root_helper=self._root_helper,
-                            run_as_root=True)
+                             run_as_root=True)
 
     def _get_nvme_subsys_parsed_unified(self):
         # Wrapper function added due to inconsistant JSON format output
@@ -276,14 +276,14 @@ class NVMeOFConnector(base.BaseLinuxConnector):
                 return out_parsed
             else:
                 subsys = []
-                for sub, pth in zip(*[iter(out_parsed)]*2):
+                for sub, pth in zip(*[iter(out_parsed)] * 2):
                     sub['Paths'] = pth['Paths']
                     subsys.append(sub)
                 return subsys
         except putils.ProcessExecutionError:
             LOG.error("Failed to get nvme subsystems")
             raise
-        except Exception as e:
+        except Exception:
             LOG.error("Failed to get nvme subsystem or deserialize data")
 
     @staticmethod
@@ -392,9 +392,9 @@ class NVMeOFConnector(base.BaseLinuxConnector):
                           force=False, ignore_errors=False):
         """Flush the volume.
 
-        Disconnect of volumes happens on storage system side. Deletion of 
+        Disconnect of volumes happens on storage system side. Deletion of
         namespace from a subsystem should propagate from storage system up.
-        The only thing left is flushing or disassembly of a correspondng 
+        The only thing left is flushing or disassembly of a correspondng
         RAID device.
 
         :param connection_properties: The dictionary that describes all
@@ -423,6 +423,13 @@ class NVMeOFConnector(base.BaseLinuxConnector):
                         "subnqn %(conn_nqn)s that is not connected.",
                         {'device_path': device_path, 'conn_nqn': conn_nqn})
             return
+
+        device = self._get_nvme_controller(self, conn_nqn, anystate=True)
+        if device is not None:
+            cmd = ['nvme', 'disconnect', '-d', '/dev/' + str(device)]
+            self._execute(*cmd,
+                          root_helper=self._root_helper,
+                          run_as_root=True)
 
         try:
             self._linuxscsi.flush_device_io(device_path)
@@ -589,7 +596,7 @@ class NVMeOFConnector(base.BaseLinuxConnector):
         return any_connect
 
     @staticmethod
-    def _get_nvme_controller(executor, target_nqn):
+    def _get_nvme_controller(executor, target_nqn, anystate=False):
         ctrls = glob.glob('/sys/class/nvme-fabrics/ctl/nvme*')
         for ctrl in ctrls:
             try:
@@ -601,7 +608,7 @@ class NVMeOFConnector(base.BaseLinuxConnector):
                         state, _err = executor._execute(
                             'cat', ctrl + '/state', run_as_root=True,
                             root_helper=executor._root_helper)
-                        if 'live' not in state:
+                        if not anystate and 'live' not in state:
                             LOG.debug("nvmeof ctrl device not live: %s", ctrl)
                             raise exception.VolumeDeviceNotFound(device=ctrl)
                         return ctrl[ctrl.rfind('/') + 1:]
