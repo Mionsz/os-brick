@@ -230,7 +230,7 @@ class NVMeOFConnector(base.BaseLinuxConnector):
             raise
 
     def _get_nvme_subsys(self):
-        # Example output:
+        # Example output: 
         # {
         #   'Subsystems' : [
         #     {
@@ -249,12 +249,42 @@ class NVMeOFConnector(base.BaseLinuxConnector):
         #   ]
         # }
         #
+        # UPDATE 19.01.2022: (builds with 'Convert to libnvme' commit)
+        #
+        # The above structure is no longer guaranteed to be valid
+        # in newer versions of nvme-cli. The two 'Subsystems' sub-objects
+        # have been merged into single one. Now it looks like 
+        #       ...
+        #       'Name' : 'nvme-subsys0',
+        #       'NQN' : 'nqn.2016-06.io.spdk:cnode1',
+        #       'Paths' : [ {...}, {...} ]
+        #       ...
 
         cmd = ['nvme', 'list-subsys', '-o', 'json']
-        ret_val = self._execute(*cmd, root_helper=self._root_helper,
-                                run_as_root=True)
+        return self._execute(*cmd, root_helper=self._root_helper,
+                            run_as_root=True)
 
-        return ret_val
+    def _get_nvme_subsys_parsed_unified(self):
+        # Wrapper function added due to inconsistant JSON format output
+        # for different nvme-cli versions/builds.
+        try:
+            (out, err) = self._get_nvme_subsys()
+            out_parsed = json.loads(out)['Subsystems']
+            if not len(out_parsed) > 0:
+                return
+            elif 'NQN' and 'Paths' in out_parsed[0]:
+                return out_parsed
+            else:
+                subsys = []
+                for sub, pth in zip(*[iter(out_parsed)]*2):
+                    sub['Paths'] = pth['Paths']
+                    subsys.append(sub)
+                return subsys
+        except putils.ProcessExecutionError:
+            LOG.error("Failed to get nvme subsystems")
+            raise
+        except Exception as e:
+            LOG.error("Failed to get nvme subsystem or deserialize data")
 
     @staticmethod
     def _filter_nvme_devices(current_nvme_devices, nvme_controller):
@@ -286,29 +316,18 @@ class NVMeOFConnector(base.BaseLinuxConnector):
         nvme_name = ""
         nvme_address = "traddr=%s trsvcid=%s" % (target_portal, port)
 
-        # Get nvme subsystems in order to find
-        # nvme name for connected nvme
-        try:
-            (out, err) = self._get_nvme_subsys()
-        except putils.ProcessExecutionError:
-            LOG.error("Failed to get nvme subsystems")
-            raise
+        subsystems = self._get_nvme_subsys_parsed_unified()
 
-        # Get subsystem list. Throw exception if out is currupt or empty
-        try:
-            subsystems = json.loads(out)['Subsystems']
-        except Exception:
+        if subsystems is None:
             return False
 
-        # Find nvme name among subsystems
-        for i in range(0, int(len(subsystems) / 2)):
-            subsystem = subsystems[i * 2]
-            if 'NQN' in subsystem and subsystem['NQN'] == conn_nqn:
-                for path in subsystems[i * 2 + 1]['Paths']:
-                    if (path['Transport'] == nvme_transport_type
-                            and path['Address'] == nvme_address):
-                        nvme_name = path['Name']
-                        break
+        for subsys in subsystems:
+            if conn_nqn in subsys['NQN']:
+                for path in subsys['Paths']:
+                    if nvme_transport_type in path['Transport']:
+                        if nvme_address in path['Address']:
+                            nvme_name = path['Name']
+                            break
 
         if not nvme_name:
             return False
@@ -373,10 +392,10 @@ class NVMeOFConnector(base.BaseLinuxConnector):
                           force=False, ignore_errors=False):
         """Flush the volume.
 
-        Disconnect of volumes happens on storage system side. Here we could
-        remove connections to subsystems if no volumes are left. But new
-        volumes can pop up asynchronously in the meantime. So the only thing
-        left is flushing or disassembly of a correspondng RAID device.
+        Disconnect of volumes happens on storage system side. Deletion of 
+        namespace from a subsystem should propagate from storage system up.
+        The only thing left is flushing or disassembly of a correspondng 
+        RAID device.
 
         :param connection_properties: The dictionary that describes all
                                       of the target volume attributes.
@@ -384,7 +403,7 @@ class NVMeOFConnector(base.BaseLinuxConnector):
                device_path - path to the volume to be connected
         :type connection_properties: dict
 
-        :param device_info: historical difference, but same as connection_props
+        :param device_info: hist. difference, but same as connection_props
         :type device_info: dict
 
         """
